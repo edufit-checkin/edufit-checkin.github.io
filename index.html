@@ -237,6 +237,27 @@ table.status-table th:first-child,
 table.status-table td:first-child{padding-left:16px;}
 table.status-table th:last-child,
 table.status-table td:last-child{padding-right:16px;}
+/* 이름·번호·시각이 두 줄로 꺾이지 않도록 */
+table.status-table th,table.status-table td{white-space:nowrap;}
+table.status-table td a{white-space:nowrap;}
+/* 휴대폰 폭: 글자·여백을 줄이고 시각은 날짜 없이 시:분만 */
+@media (max-width: 480px){
+  table.status-table{font-size:12px;}
+  table.status-table th{padding:8px 5px;font-size:10.5px;}
+  table.status-table td{padding:9px 5px;}
+  table.status-table th:first-child,table.status-table td:first-child{padding-left:10px;}
+  table.status-table th:last-child,table.status-table td:last-child{padding-right:10px;}
+  table.status-table .t-date,table.status-table .t-long{display:none;}
+  table.status-table .badge-pill{padding:3px 7px;font-size:10.5px;}
+}
+/* 아이폰 SE 등 아주 좁은 폭 */
+@media (max-width: 360px){
+  table.status-table{font-size:11.5px;}
+  table.status-table th,table.status-table td{padding-left:3px;padding-right:3px;}
+  table.status-table th:first-child,table.status-table td:first-child{padding-left:8px;}
+  table.status-table th:last-child,table.status-table td:last-child{padding-right:8px;}
+  table.status-table .badge-pill{padding:2px 5px;}
+}
 .badge-pill{
   display:inline-block;padding:3px 9px;border-radius:20px;font-size:11px;font-weight:600;
 }
@@ -383,7 +404,7 @@ table.status-table td:last-child{padding-right:16px;}
       <input type="text" class="status-search" id="statusSearch" placeholder="이름으로 검색">
       <div class="card" style="padding:0;overflow-x:auto;">
         <table class="status-table">
-          <thead><tr><th>이름</th><th>번호</th><th>상태</th><th>출석시각</th><th>종료시각</th></tr></thead>
+          <thead><tr><th>이름</th><th>번호</th><th>상태</th><th>출석<span class="t-long">시각</span></th><th>종료<span class="t-long">시각</span></th></tr></thead>
           <tbody id="statusBody"></tbody>
         </table>
       </div>
@@ -524,6 +545,14 @@ function fmtTime(iso){
   var hh = String(d.getHours()).padStart(2,"0");
   var mi = String(d.getMinutes()).padStart(2,"0");
   return mm + "/" + dd + " " + hh + ":" + mi;
+}
+
+/* 현황 표용: 날짜 부분을 따로 감싸 휴대폰 폭에서는 숨김 */
+function fmtTimeCell(iso){
+  if (!iso) return "-";
+  var t = fmtTime(iso);
+  var i = t.indexOf(" ");
+  return '<span class="t-date">' + t.slice(0, i + 1) + '</span>' + t.slice(i + 1);
 }
 
 /* Full, unambiguous, round-trippable timestamp for excel export/merge */
@@ -1013,8 +1042,8 @@ function renderStatus(searchTerm){
       '<td>' + escapeHtml(a.name || "-") + '</td>' +
       '<td>' + (a.phone ? '<a href="tel:' + escapeHtml(a.phone) + '" style="color:var(--accent);text-decoration:none;">' + escapeHtml(a.phone) + '</a>' : '-') + '</td>' +
       '<td>' + statusCell + '</td>' +
-      '<td>' + fmtTime(a.checkedAt1) + '</td>' +
-      '<td>' + fmtTime(a.checkedAt2) + '</td>';
+      '<td>' + fmtTimeCell(a.checkedAt1) + '</td>' +
+      '<td>' + fmtTimeCell(a.checkedAt2) + '</td>';
     body.appendChild(tr);
   });
 }
