@@ -1,0 +1,10 @@
+# 실제 명단·결과 엑셀은 절대 올리지 않음 (공개 저장소)
+*.xlsx
+*.xls
+*.csv
+!tests/demo/*.xlsx
+# 테스트·작업 부산물
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db

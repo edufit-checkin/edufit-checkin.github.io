@@ -1339,30 +1339,63 @@ function last4(phone){ var d = onlyDigits(phone); return d.slice(-4); }
 /* 교육생별 암호화값
    - 기본: 공개ID + 이름 + 휴대전화 뒷자리 4자리 (셀프 체크인과 같은 값)
    - 이름+뒷자리가 겹치는 사람: 공개ID + 이름 + 전체 번호 (셀프 체크인 불가, 키패드로 처리) */
+/* 교육생 키: PBKDF2(SHA-256, 반복 KEY_ITER회)로 만든 변환값.
+   일부러 느리게 만들어 이름·뒷자리를 하나씩 대입해 보는 시도를 어렵게 합니다.
+   셀프 체크인 페이지(self.html)와 반드시 같은 규칙·반복 횟수여야 합니다. */
+var KEY_ITER = 150000;
+async function deriveKey(secret, pub){
+  var enc = new TextEncoder();
+  var base = await crypto.subtle.importKey("raw", enc.encode(secret), "PBKDF2", false, ["deriveBits"]);
+  var bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt: enc.encode("edufit|" + pub), iterations: KEY_ITER, hash: "SHA-256" }, base, 128);
+  return Array.from(new Uint8Array(bits)).map(function(b){ return b.toString(16).padStart(2, "0"); }).join("");
+}
+
+/* 여러 개를 동시에 계산하며 진행 상황 표시 */
+async function deriveMany(secrets, pub, onProgress){
+  var out = new Array(secrets.length), done = 0, next = 0;
+  async function worker(){
+    while (next < secrets.length){
+      var i = next++;
+      out[i] = await deriveKey(secrets[i], pub);
+      done++; if (onProgress) onProgress(done, secrets.length);
+    }
+  }
+  var n = Math.min(4, secrets.length), ws = [];
+  for (var w = 0; w < n; w++) ws.push(worker());
+  await Promise.all(ws);
+  return out;
+}
+
 async function syncBuildKeys(){
   sync.ready = false;
   var code = sync.code, pub = sync.pub;
-  var count = {}, skeyOf = {};
-  for (var i = 0; i < state.attendees.length; i++){
-    var a = state.attendees[i];
-    var sk = await sha256Hex(pub + "|s|" + selfNameNorm(a.name) + "|" + last4(a.phone));
-    skeyOf[a.id] = sk;
-    count[sk] = (count[sk] || 0) + 1;
-  }
+  var list = state.attendees.slice();
+  var showProgress = function(d, t){
+    if (code === sync.code && sync.status === "wait") $("syncInfo").textContent = "명단 준비 중… " + d + " / " + t;
+  };
+  var skeys = await deriveMany(list.map(function(a){ return selfNameNorm(a.name) + "|" + last4(a.phone); }), pub, showProgress);
+  if (code !== sync.code) return false;
+  var count = {};
+  skeys.forEach(function(k){ count[k] = (count[k] || 0) + 1; });
+  // 이름+뒷자리가 겹치는 사람: 전체 번호로 키를 만들고 셀프 체크인은 막음
+  var dupIdx = [];
+  list.forEach(function(a, i){ if (count[skeys[i]] > 1) dupIdx.push(i); });
+  var fkeys = await deriveMany(dupIdx.map(function(i){ return "f|" + keyFor(list[i].name, list[i].phone); }), pub);
+  if (code !== sync.code) return false;
   var keyToId = {}, idToKey = {}, roster = [], dups = [];
-  for (var j = 0; j < state.attendees.length; j++){
-    var b = state.attendees[j];
-    var k = skeyOf[b.id];
-    if (count[k] > 1){
+  list.forEach(function(a, i){
+    var k = skeys[i];
+    var di = dupIdx.indexOf(i);
+    if (di !== -1){
       if (dups.indexOf(k) === -1) dups.push(k);
-      k = await sha256Hex(pub + "|f|" + keyFor(b.name, b.phone));
+      k = fkeys[di];
     } else {
       roster.push(k);
     }
-    keyToId[k] = b.id;
-    idToKey[b.id] = k;
-  }
-  if (code !== sync.code) return false; // 계산 중 코드가 바뀜
+    keyToId[k] = a.id;
+    idToKey[a.id] = k;
+  });
   sync.keyToId = keyToId;
   sync.idToKey = idToKey;
   sync.rosterKeys = roster;
@@ -1399,6 +1432,8 @@ async function loadFirebase(){
 
 function eventRef(){ return sync.fb.fs.doc(sync.fb.db, "events", sync.pub); }
 function recordRef(key){ return sync.fb.fs.doc(sync.fb.db, "events", sync.pub, "records", key); }
+/* 명단 대조용: 교육생은 자기 변환값 1건만 조회할 수 있고 목록은 볼 수 없음(보안 규칙) */
+function rosterRef(key){ return sync.fb.fs.doc(sync.fb.db, "events", sync.pub, "roster", key); }
 
 /* 이 기기에서 확인한 시각을 서버에 기록 (기기별 필드라 서로 덮어쓰지 않음) */
 function syncPush(a){
@@ -1423,11 +1458,15 @@ function recordData(a){
 /* 연결 직후: 셀프 체크인 대조 목록과 이 기기에만 있던 기록을 올림 */
 async function syncPushAll(){
   var fs = sync.fb.fs;
-  // 기기마다 명단 구간이 달라도 서로 지우지 않도록 합집합(arrayUnion)으로 추가
-  var ev = { updatedAt: fs.serverTimestamp() };
-  if (sync.rosterKeys.length) ev.roster = fs.arrayUnion.apply(null, sync.rosterKeys);
-  if (sync.dupKeys.length) ev.dup = fs.arrayUnion.apply(null, sync.dupKeys);
-  await fs.setDoc(eventRef(), ev, { merge: true });
+  await fs.setDoc(eventRef(), { updatedAt: fs.serverTimestamp() }, { merge: true });
+  // 명단 대조용 문서: 변환값마다 1건 (기기마다 명단 구간이 달라도 서로 지우지 않음)
+  var rk = sync.rosterKeys.map(function(k){ return [k, {}]; })
+    .concat(sync.dupKeys.map(function(k){ return [k, { dup: true }]; }));
+  for (var r = 0; r < rk.length; r += 400){
+    var rb = fs.writeBatch(sync.fb.db);
+    rk.slice(r, r + 400).forEach(function(e){ rb.set(rosterRef(e[0]), e[1]); });
+    await rb.commit();
+  }
 
   var list = state.attendees.filter(function(a){ return a.checkedAt1 || a.checkedAt2; });
   for (var i = 0; i < list.length; i += 400){
@@ -1487,7 +1526,7 @@ async function syncConnect(code){
 
   syncStop();
   sync.code = code;
-  sync.pub = (await sha256Hex("pub|" + code)).slice(0, 12);
+  sync.pub = (await deriveKey("pub|" + code, "event")).slice(0, 12); // 느린 변환이라 QR의 공개ID로 행사 코드를 역산하기 어려움
   sync.errorMsg = "";
   try{ localStorage.setItem(SYNC_CODE_KEY, code); }catch(e){}
   syncSetStatus("wait");
@@ -1739,10 +1778,11 @@ async function selfWipe(){
   var fs = sync.fb.fs;
   try{
     syncStop();
-    var ids = sync.recordIds.slice();
-    for (var i = 0; i < ids.length; i += 400){
+    var refs = sync.recordIds.map(recordRef)
+      .concat(sync.rosterKeys.concat(sync.dupKeys).map(rosterRef));
+    for (var i = 0; i < refs.length; i += 400){
       var batch = fs.writeBatch(sync.fb.db);
-      ids.slice(i, i + 400).forEach(function(id){ batch["delete"](recordRef(id)); });
+      refs.slice(i, i + 400).forEach(function(ref){ batch["delete"](ref); });
       await batch.commit();
     }
     await fs.deleteDoc(eventRef());

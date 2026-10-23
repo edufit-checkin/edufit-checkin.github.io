@@ -1,0 +1,15 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /events/{eventId} {
+      allow read, write: if request.auth != null;
+      match /records/{recordId} {
+        allow read, write: if request.auth != null;
+      }
+      // 명단 대조용: 1건 조회(get)만 허용, 목록 조회(list)는 막음
+      match /roster/{key} {
+        allow get, write: if request.auth != null;
+      }
+    }
+  }
+}

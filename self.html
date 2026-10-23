@@ -117,9 +117,14 @@ let fs = null, db = null, eventDoc = null, mode = null, busy = false;
 const normName = (s) => String(s == null ? "" : s).trim().replace(/\s+/g, "").toLowerCase();
 const onlyDigits = (s) => String(s == null ? "" : s).replace(/[^0-9]/g, "");
 
-async function sha256Hex(text){
-  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
-  return Array.from(new Uint8Array(buf)).slice(0, 16).map(b => b.toString(16).padStart(2, "0")).join("");
+/* 담당자 앱과 같은 규칙·반복 횟수 (PBKDF2-SHA256) */
+const KEY_ITER = 150000;
+async function deriveKey(secret){
+  const enc = new TextEncoder();
+  const base = await crypto.subtle.importKey("raw", enc.encode(secret), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt: enc.encode("edufit|" + pub), iterations: KEY_ITER, hash: "SHA-256" }, base, 128);
+  return Array.from(new Uint8Array(bits)).map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
 function earliest(data, prefix){
@@ -193,23 +198,29 @@ async function submit(e){
   document.activeElement && document.activeElement.blur();
 
   try{
-    const key = await sha256Hex(pub + "|s|" + normName(nameRaw) + "|" + l4);
-    const data = eventDoc || {};
+    const key = await deriveKey(normName(nameRaw) + "|" + l4);
     try{ localStorage.setItem(SAVE_KEY, JSON.stringify({ name: nameRaw, last4: l4 })); }catch(_){}
 
-    if ((data.dup || []).indexOf(key) !== -1){
+    // 명단 확인과 출석 기록을 동시에 1건씩 조회 (명단 전체는 받을 수 없음)
+    const ref = fs.doc(db, "events", pub, "records", key);
+    const [rosterSnap, snap] = await withTimeout(Promise.all([
+      fs.getDoc(fs.doc(db, "events", pub, "roster", key)),
+      fs.getDoc(ref)
+    ]), 10000);
+    const inRoster = rosterSnap.exists();
+    const isDup = inRoster && !!(rosterSnap.data() || {}).dup;
+
+    if (isDup){
       showResult("bad", "담당자 확인이 필요해요", nameRaw, "",
         "이름과 번호 뒷자리가 같은 분이 있어\nQR로는 확인할 수 없어요.\n담당자가 직접 확인해 드릴게요.");
       return;
     }
-    if ((data.roster || []).indexOf(key) === -1){
+    if (!inRoster){
       showResult("bad", "명단에서 찾지 못했어요", nameRaw, "",
         "이름과 휴대전화 뒷자리를 다시 확인해주세요.\n계속 안 되면 담당자에게 말씀해주세요.");
       return;
     }
 
-    const ref = fs.doc(db, "events", pub, "records", key);
-    const snap = await withTimeout(fs.getDoc(ref), 10000);
     const rec = snap.exists() ? snap.data() : {};
     const t1 = earliest(rec, "t1_"), t2 = earliest(rec, "t2_");
     const now = new Date().toISOString();
